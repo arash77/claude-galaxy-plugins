@@ -20,10 +20,11 @@ A Claude Code plugin marketplace for Galaxy Project related plugins.
 | Plugin | Description |
 |--------|-------------|
 | [gx-arch-review](plugins/gx-arch-review/README.md) | Code review commands for Galaxy codebase contributions |
+| [gx-dev](plugins/gx-dev/README.md) | Skills and an exploration agent for writing Galaxy code: migrations, API endpoints, tests, linting |
 
 ## Development
 
-This marketplace is built from the [galaxy-architecture](https://github.com/jmchilton/galaxy-architecture) repository.
+The `gx-arch-review` plugin is built from the [galaxy-architecture](https://github.com/jmchilton/galaxy-architecture) repository.
 
 ### Local Testing
 

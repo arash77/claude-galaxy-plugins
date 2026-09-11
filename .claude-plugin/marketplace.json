@@ -10,6 +10,12 @@
   },
   "plugins": [
     {
+      "name": "gx-dev",
+      "source": "./plugins/gx-dev",
+      "description": "Skills and an exploration agent for writing Galaxy code: migrations, API endpoints, tests, linting",
+      "strict": false
+    },
+    {
       "name": "gx-arch-review",
       "source": "./plugins/gx-arch-review",
       "description": "Code review commands for Galaxy codebase contributions",
