@@ -53,15 +53,15 @@ to the other skills based on what you ask for.
 ### galaxy-context
 
 Loads automatically when working in a Galaxy codebase. Routes to the other skills based on
-detected intent, and carries the conventions that apply regardless of task: always use
-`./run_tests.sh`, never read `client/src/api/schema/schema.ts` or `lib/galaxy/model/__init__.py`
-in full, the manager pattern, and FastAPI router structure.
+detected intent, and carries the conventions that apply regardless of task: how `./run_tests.sh`
+and direct `pytest` relate, never reading `client/packages/api-client/src/schema/schema.ts` or
+`lib/galaxy/model/__init__.py` in full, the manager pattern, and FastAPI router structure.
 
 ### galaxy-db-migration
 
 Walks through creating a revision against Galaxy's `gxy` and `tsi` Alembic branches: update the
 model, create the revision file, fill in `upgrade()`/`downgrade()`, run, verify. Also covers
-upgrade/downgrade/status commands and six named failure modes — deadlock, `IncorrectVersionError`,
+upgrade/downgrade/status commands and six named failure modes — deadlock, `IncorrectSAMigrateVersionError`,
 startup version mismatch, table-already-exists, missing revision file, and foreign key violations.
 
 ### galaxy-api-endpoint
@@ -77,8 +77,8 @@ Covers *writing* tests: `BaseTestCase` structure for unit tests, `ApiTestCase` a
 `IntegrationTestCase` with configuration mixins and skip decorators for integration tests.
 `reference.md` carries base-class API references, common test patterns, and per-type checklists.
 
-For *running* tests, install the `gx-test-runner` plugin from this marketplace — it owns the
-`./run_tests.sh` reference. Each guide here still ends with the command to execute what you wrote.
+For *running* tests, `run_tests.sh --help` is the authoritative reference, and `pytest` works
+directly on any Galaxy test. Each guide here ends with the command to execute what you wrote.
 
 ### galaxy-linting
 
@@ -117,8 +117,7 @@ claude-galaxy-plugins/
 - **`gx-arch-review`** — reviews changes after they are written. Complementary: several topics
   appear in both, from opposite directions (this plugin builds a migration, `gx-review-migration`
   checks one).
-- **`gx-test-runner`** — owns running tests. `gx-dev:galaxy-test-writing` deliberately does not
-  duplicate its `./run_tests.sh` reference.
+  This marketplace currently ships `gx-dev` and `gx-arch-review`.
 
 ## License
 

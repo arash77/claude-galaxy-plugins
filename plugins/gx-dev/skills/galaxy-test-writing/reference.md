@@ -26,20 +26,22 @@ pytest.TestCase (pytest framework)
 ### Unit Tests
 
 ```python
-# Base class
-from test.unit.app.managers.base import BaseTestCase
+# Base class - relative import; the tests live alongside base.py
+from .base import BaseTestCase
 
-# Models
-from galaxy import model
+# Models and exceptions
+from galaxy import (
+    exceptions,
+    model,
+)
 
 # Manager under test
 from galaxy.managers.myresource import MyResourceManager
 
-# Exceptions
-from galaxy import exceptions
-
-# Mock transaction
-from galaxy_mock import MockTrans
+# Mock transaction - only if you need a second one; BaseTestCase already
+# gives you self.trans. Note the module path and that MockTrans is accessed
+# through the module, not imported directly.
+from galaxy.app_unittest_utils import galaxy_mock
 ```
 
 ### API Tests
@@ -55,12 +57,12 @@ from galaxy_test.base.populators import (
     LibraryPopulator,
 )
 
-# Decorators
+# Decorators - note skip_without_tool lives in populators, NOT decorators
 from galaxy_test.base.decorators import (
     requires_admin,
     requires_new_user,
-    skip_without_tool,
 )
+from galaxy_test.base.populators import skip_without_tool
 ```
 
 ### Integration Tests
@@ -88,47 +90,45 @@ from galaxy_test.base.populators import (
 ### Available Attributes
 
 ```python
-self.app           # Galaxy application mock
-self.trans         # MockTrans with test user (admin)
-self.user          # Test user object (admin)
-self.session       # SQLAlchemy session (in-memory SQLite)
-self.history       # Default test history
+self.mock_trans    # galaxy_mock.MockTrans instance
+self.trans         # the same object, typed as SessionRequestContext
+self.app           # galaxy_mock app; also the DI container -> self.app[SomeManager]
+self.user_manager  # UserManager (set by set_up_managers)
+self.admin_user    # admin User (set by set_up_trans)
 ```
+
+That is the complete list (`test/unit/app/managers/base.py`). There is no `self.session`,
+`self.user` or `self.history`. Use `self.trans.sa_session` for the database session.
 
 ### Common Methods
 
 ```python
-# Set up managers
+# Set up managers - ALWAYS chain to super() first, then resolve from the container
 def set_up_managers(self):
-    self.manager = MyResourceManager(self.app)
+    super().set_up_managers()
+    self.manager = self.app[MyResourceManager]
 
-# Create test user
+# Create an extra test user - go through the manager, which commits for you
 def _create_user(self, email: str):
-    user = model.User(email=email, username=email.split("@")[0])
-    self.session.add(user)
-    self.session.flush()
-    return user
+    return self.user_manager.create(email=email, username=email.split("@")[0], password="123456")
 
-# Create transaction for user
-def _create_trans(self, user=None):
-    from galaxy_mock import MockTrans
-    return MockTrans(app=self.app, user=user or self.user)
+# The database session
+session = self.trans.sa_session
 ```
 
 ### Example Test Template
 
 ```python
-from test.unit.app.managers.base import BaseTestCase
 from galaxy.managers.myresource import MyResourceManager
+from .base import BaseTestCase
+
 
 class TestMyResourceManager(BaseTestCase):
-
-    def setUp(self):
-        super().setUp()
-        self.set_up_managers()
-
+    # Do NOT override setUp() - BaseTestCase.setUp() already calls
+    # set_up_mocks() -> set_up_managers() -> set_up_trans() in that order.
     def set_up_managers(self):
-        self.manager = MyResourceManager(self.app)
+        super().set_up_managers()
+        self.manager = self.app[MyResourceManager]
 
     def test_example(self):
         # Arrange
@@ -136,7 +136,6 @@ class TestMyResourceManager(BaseTestCase):
 
         # Act
         result = self.manager.create(self.trans, name=name)
-        self.session.flush()
 
         # Assert
         assert result.name == name
@@ -236,8 +235,8 @@ def test_with_dataset(self):
 from galaxy_test.base.decorators import (
     requires_admin,
     requires_new_user,
-    skip_without_tool,
 )
+from galaxy_test.base.populators import skip_without_tool
 
 class TestMyApi(ApiTestCase):
 
@@ -366,25 +365,40 @@ dataset = populator.new_dataset(
     file_type="txt"
 )
 
-# Wait for dataset
+# Wait for a dataset / the whole history
 populator.wait_for_dataset(history_id, dataset["id"])
+populator.wait_for_history(history_id)
 
-# Get dataset content
-content = populator.get_dataset_content(history_id, dataset_id=dataset["id"])
+# Get dataset content and details
+content = populator.get_history_dataset_content(history_id, dataset_id=dataset["id"])
+details = populator.get_history_dataset_details(history_id)
 
-# Create collection
-collection = populator.create_list_collection(
-    history_id,
-    [dataset["id"], dataset2["id"]],
-    name="Test Collection"
-)
+# List everything in a history
+contents = populator.get_history_contents(history_id)
 
-# Upload file
-dataset = populator.upload_file(
-    history_id,
-    content="file content",
-    filename="test.txt"
-)
+# Run a tool
+populator.run_tool("cat1", {"input1": {"src": "hda", "id": dataset["id"]}}, history_id)
+```
+
+> `new_dataset(..., wait=True)` is the normal way to upload content - there is no
+> `upload_file()`, no `get_dataset_content()` and no `get_history_datasets()`.
+
+### DatasetCollectionPopulator
+
+Collections have their **own** populator - they are not on `DatasetPopulator`:
+
+```python
+from galaxy_test.base.populators import DatasetCollectionPopulator
+
+collection_populator = DatasetCollectionPopulator(self.galaxy_interactor)
+
+# Create a list collection in a history
+response = collection_populator.create_list_in_history(history_id, wait=True)
+
+# Other shapes
+collection_populator.create_pair_in_history(history_id, wait=True)
+collection_populator.create_list_of_pairs_in_history(history_id, wait=True)
+collection_populator.create_list_of_list_in_history(history_id, wait=True)
 ```
 
 ### WorkflowPopulator
@@ -395,18 +409,22 @@ populator = WorkflowPopulator(self.galaxy_interactor)
 # Create workflow
 workflow_id = populator.create_workflow(workflow_dict)
 
-# Run workflow
-invocation = populator.invoke_workflow(
-    history_id,
+# Run workflow. NOTE the argument order: workflow_id FIRST, history_id second.
+# invoke_workflow() returns a requests Response, not a dict.
+invocation_id = populator.invoke_workflow_and_assert_ok(
     workflow_id,
-    inputs={"input1": {"id": dataset_id, "src": "hda"}}
+    history_id=history_id,
+    inputs={"input1": {"id": dataset_id, "src": "hda"}},
 )
 
 # Wait for workflow
-populator.wait_for_workflow(workflow_id, invocation["id"], history_id)
+populator.wait_for_workflow(workflow_id, invocation_id, history_id)
 
-# Get workflow
-workflow = populator.get_workflow(workflow_id)
+# Or do both in one call
+populator.invoke_workflow_and_wait(workflow_id, history_id=history_id, inputs=inputs)
+
+# Download the workflow definition (there is no get_workflow())
+workflow = populator.download_workflow(workflow_id)
 
 # Import workflow from GA file
 workflow_id = populator.import_workflow_from_path(path_to_ga_file)
@@ -420,12 +438,18 @@ populator = LibraryPopulator(self.galaxy_interactor)
 # Create library
 library = populator.new_library("Test Library")
 
-# Create folder
-folder = populator.new_folder(library["id"], "Test Folder")
+# Create a private library (returns library, folder_id, dataset)
+library, folder_id, dataset = populator.new_library_dataset_in_private_library("Test Library")
 
 # Upload to library
 dataset = populator.new_library_dataset("Test Dataset", file_path)
+
+# Inspect
+contents = populator.get_library_contents(library["id"])
 ```
+
+> There is no `new_folder()` on `LibraryPopulator`; folders come back from
+> `new_private_library()` / `new_library_dataset_in_private_library()`.
 
 ## Test Command Reference
 
@@ -433,7 +457,7 @@ dataset = populator.new_library_dataset("Test Dataset", file_path)
 
 ```bash
 # Unit tests
-./run_tests.sh -unit test/unit/managers/test_myresource.py
+./run_tests.sh -unit test/unit/app/managers/test_myresource.py
 
 # API tests
 ./run_tests.sh -api lib/galaxy_test/api/test_myresources.py
@@ -639,22 +663,22 @@ def test_workflow_integration(self):
     history_id = self.dataset_populator.new_history()
     dataset = self.dataset_populator.new_dataset(history_id)
 
-    # Invoke workflow
-    invocation = self.workflow_populator.invoke_workflow(
-        history_id,
+    # Invoke workflow - workflow_id first; this helper returns the invocation id
+    invocation_id = self.workflow_populator.invoke_workflow_and_assert_ok(
         workflow_id,
-        inputs={"input1": {"id": dataset["id"], "src": "hda"}}
+        history_id=history_id,
+        inputs={"input1": {"id": dataset["id"], "src": "hda"}},
     )
 
     # Wait for completion
     self.workflow_populator.wait_for_workflow(
         workflow_id,
-        invocation["id"],
-        history_id
+        invocation_id,
+        history_id,
     )
 
     # Verify outputs
-    outputs = self.dataset_populator.get_history_datasets(history_id)
+    outputs = self.dataset_populator.get_history_contents(history_id)
     assert len(outputs) > 1  # Original input + workflow outputs
 ```
 
@@ -667,7 +691,7 @@ def test_workflow_integration(self):
 **Cause:** Multiple tests accessing SQLite concurrently
 
 **Solutions:**
-1. Run tests serially: `./run_tests.sh -unit test/unit/managers/test_myresource.py`
+1. Run tests serially: `./run_tests.sh -unit test/unit/app/managers/test_myresource.py`
 2. Use pytest-xdist: `./run_tests.sh -unit test/unit/ -n auto`
 3. For integration tests against PostgreSQL, set `GALAXY_TEST_DBURI`: `GALAXY_TEST_DBURI=postgresql://user@localhost/galaxytest ./run_tests.sh -integration test/integration/`
 
@@ -719,10 +743,10 @@ def test_workflow_integration(self):
 
 ### When Writing Unit Tests
 
-- [ ] Extend `BaseTestCase` from `test.unit.app.managers.base`
-- [ ] Override `set_up_managers()` to instantiate manager
-- [ ] Use `self.trans` for transaction context
-- [ ] Use `self.session.flush()` after creates/updates
+- [ ] Extend `BaseTestCase` via `from .base import BaseTestCase`
+- [ ] Override `set_up_managers()` **and call `super().set_up_managers()` first**
+- [ ] Resolve the manager from the container: `self.app[MyManager]`
+- [ ] Use `self.trans` for request context, `self.trans.sa_session` for the session
 - [ ] Test both success and error cases
 - [ ] Use helper methods for test data creation
 

@@ -39,7 +39,7 @@ Galaxy uses multiple linting tools enforced through CI:
 | **pyupgrade** | Modernize Python syntax | N/A | N/A | `make pyupgrade` |
 | **mypy** | Type checker | `pyproject.toml` | `tox -e mypy` | N/A (manual) |
 | **ESLint** | JavaScript/TypeScript linter | `client/.eslintrc.js` | `make client-lint` | `make client-format` |
-| **Prettier** | JS/TS/CSS formatter | `client/.prettierrc.yml` | `make client-lint` | `make client-format` |
+| **Prettier** | JS/TS/CSS formatter | `client/prettier.config.js` | `make client-lint` | `make client-format` |
 
 ---
 
@@ -79,8 +79,11 @@ make diff-format
 ```
 
 **What it does:**
-- Runs black and isort only on lines you modified
-- Compares against `origin/dev` branch
+- Runs `darker .`, i.e. black (and isort) only on lines you modified
+- **Compares against your last commit, not `origin/dev`.** `Makefile` has plain `darker .`
+  with no `--revision`. Once you commit work-in-progress, `make diff-format` stops seeing
+  those lines - and CI will still fail on them. Run `make format` (or
+  `darker --revision origin/dev .`) before pushing a branch with several commits.
 - Much faster than formatting entire codebase
 - Recommended for daily development
 
@@ -155,19 +158,32 @@ ruff check --fix .
 
 **Configuration:** `pyproject.toml` under `[tool.ruff]` and `[tool.ruff.lint]`
 
-**Key rule categories:**
-- **F**: Pyflakes errors (undefined names, unused imports)
-- **E, W**: PEP 8 style violations
-- **I**: Import sorting (isort-compatible)
-- **N**: Naming conventions
-- **UP**: Modernization (e.g., use `list[int]` instead of `List[int]`)
-- **B**: Bugbear (likely bugs)
-- **A**: Avoid shadowing builtins
+**Enabled rule categories** - the full `select` list, verbatim from `pyproject.toml`:
+
+```toml
+select = ["E", "F", "B", "C4", "G", "ISC", "NPY", "UP"]
+ignore = ["B008", "B9", "E402", "E501", "G001", "G002", "G004"]
+```
+
+- **E**: pycodestyle errors
+- **F**: Pyflakes (undefined names, unused imports)
+- **B**: bugbear (likely bugs)
+- **C4**: comprehensions
+- **G**: logging format
+- **ISC**: implicit string concatenation
+- **NPY**: NumPy rules
+- **UP**: pyupgrade / modernization
+
+**Not enabled - do not expect ruff to catch these:**
+- **I** (import sorting). `pyproject.toml` says so explicitly: *"We are not selecting 'I' rules
+  in ruff yet because the isort option force_grid_wrap=2 is not currently supported."*
+  **`ruff check --fix` will not sort your imports** - run `isort .` (or `make format`).
+- **W**, **N**, **A** - not in the select list at all.
+- **E501** (line length) is in the `ignore` list - delegated to black.
 
 **Common errors and fixes:**
 - `F401` - Unused import → Remove import or use `# noqa: F401`
 - `F841` - Unused variable → Remove or rename to `_`
-- `E501` - Line too long (>120 chars) → Break into multiple lines
 - `UP` - Use modern syntax → Let ruff auto-fix with `--fix`
 
 ### Black (Code Formatter)
@@ -207,9 +223,15 @@ isort --check .
 isort .
 ```
 
-**Configuration:** `pyproject.toml` under `[tool.isort]`
-- Profile: "black" (compatible with black formatting)
-- Line length: 120
+**Configuration:** `.isort.cfg` in the repository root - **not** `pyproject.toml`
+(there is no `[tool.isort]` section there; the `[tool.ruff.lint.isort]` section in
+`pyproject.toml` is a different thing and is inert while "I" rules are unselected).
+
+- `profile = black`
+- `line_length = 120`
+- `force_grid_wrap = 2` - **Galaxy-specific**: any import of 2+ names gets one name per line.
+  This is the setting ruff cannot yet reproduce, and the usual reason `tox -e format` fails.
+- `reverse_relative = true`, `force_alphabetical_sort_within_sections = true`
 
 **Import groups (in order):**
 1. Standard library imports
@@ -228,19 +250,31 @@ from pydantic import BaseModel
 
 # Local
 from galaxy.managers.workflows import WorkflowsManager
-from galaxy.schema.schema import WorkflowSummary
+from galaxy.schema.schema import StoredWorkflowSummary
 ```
 
 ### Flake8 (Legacy Linter)
 
 **Traditional Python linter** - still used alongside ruff.
 
-**Run flake8:**
+**Run flake8 the way CI does** - a bare `flake8 .` is not equivalent:
+
 ```bash
-flake8 .
+bash .ci/flake8_wrapper.sh
 ```
 
-**Configuration:** `.flake8` file in repository root
+That wrapper is two passes:
+
+```bash
+flake8 --exclude $(paste -sd, .ci/flake8_ignorelist.txt) .
+# plus stricter rules for the directories shared with Pulsar
+flake8 --ignore=E203,D --max-line-length=150 lib/galaxy/jobs/runners/util/
+```
+
+**Configuration:** `.flake8` in the repository root - but note its own `exclude` is only
+`lib/tool_shed/test/test_data/repos`. The real exclusions come from
+`.ci/flake8_ignorelist.txt` via the wrapper. Running bare `flake8 .` therefore lints
+`.venv/` and `node_modules/` while **skipping the second, stricter pass CI enforces**.
 
 **Note:** Ruff covers most flake8 checks. Galaxy maintains flake8 for specific rules not yet in ruff.
 
@@ -254,10 +288,10 @@ make diff-format
 ```
 
 **How it works:**
-- Compares working tree to `origin/dev`
-- Runs black and isort only on modified lines
+- `darker .` - compares the working tree to **the last commit** (not `origin/dev`)
+- Runs black and isort only on those modified lines
 - Much faster than full formatting
-- Ideal for daily development
+- Ideal for uncommitted work; use `make format` before pushing a multi-commit branch
 
 **Use when:**
 - Working on large files with many unchanged lines
@@ -339,7 +373,7 @@ make client-lint
 make client-format
 ```
 
-**Configuration:** `client/.prettierrc.yml`
+**Configuration:** `client/prettier.config.js`
 
 **Formats:**
 - JavaScript/TypeScript files
@@ -383,17 +417,17 @@ This is used by Git hooks and operates on specific file paths rather than glob p
 
 ### Manual Commands
 
-**Run ESLint directly:**
+**Run ESLint directly** (the client uses **pnpm**, see `packageManager` in `client/package.json`):
 ```bash
 cd client
-npm run eslint
+pnpm run eslint
 ```
 
 **Run Prettier directly:**
 ```bash
 cd client
-npm run prettier:check  # Check
-npm run prettier:write  # Fix
+pnpm run format-check   # Check
+pnpm run format          # Fix (alias: pnpm run prettier)
 ```
 
 ### Client Lint Workflow
@@ -434,13 +468,24 @@ mypy lib/galaxy/managers/workflows.py
 mypy lib/galaxy/schema/
 ```
 
-**Configuration:** `pyproject.toml` under `[tool.mypy]`
+**Configuration:** `mypy.ini` in the repository root - **not** `pyproject.toml`
+(there is no `[tool.mypy]` section there).
 
-**Strict mode enabled:**
-- `disallow_untyped_defs` - All functions must have type hints
-- `disallow_any_generics` - Must specify generic types (e.g., `List[str]` not `List`)
-- `warn_return_any` - Warn on returning `Any`
-- `warn_unused_ignores` - Warn on unnecessary `# type: ignore` comments
+**Galaxy is not in strict mode.** The global `[mypy]` section sets moderate options:
+
+- `check_untyped_defs = True`
+- `ignore_missing_imports = True`
+- `no_implicit_optional = True`, `no_implicit_reexport = True`
+- `strict_equality = True`, `warn_redundant_casts = True`
+- `warn_unreachable = True`, `warn_unused_ignores = True`
+
+The stricter flags (`disallow_untyped_defs`, `disallow_any_generics`,
+`disallow_subclassing_any`, ...) are applied **per module**, under a growing list of
+`[mypy-galaxy.some.module]` sections below the comment
+`# green list - work on growing these please!`.
+
+So: a missing annotation is only an error if the module you touched is on that green list.
+Check `mypy.ini` for your module before assuming a rule applies.
 
 ### Common Type Errors
 
@@ -547,9 +592,12 @@ def apply_function(func: Callable[[int], str], value: int) -> str:
     return func(value)
 ```
 
-### Type Stubs
+### Untyped Dependencies
 
-Galaxy provides type stubs for untyped dependencies in `lib/galaxy/type_stubs/`.
+Galaxy does **not** vendor type stubs (there is no `lib/galaxy/type_stubs/`, and no `.pyi`
+files under `lib/`). Instead `mypy.ini` sets `ignore_missing_imports = True` globally, and
+third-party stub packages are pinned in
+`lib/galaxy/dependencies/pinned-typecheck-requirements.txt`.
 
 ---
 
@@ -616,8 +664,9 @@ tox -e format && tox -e lint && tox -e mypy && tox -e lint_docstring_include_lis
 - Fix with: Add type hints manually
 
 **`tox -e lint_docstring_include_list`:**
-- Runs: ruff on docstring_include_list modules
-- Purpose: Enforce docstring standards on core modules
+- Runs: `bash .ci/flake8_wrapper_docstrings.sh --include` - **flake8**, not ruff
+  (ruff selects no `D` rules at all)
+- Purpose: Enforce docstring standards on the modules in the include list
 - Fix with: Add/improve docstrings
 
 ### CI Workflow File
@@ -818,7 +867,7 @@ make client-lint
 - `.flake8` - flake8 configuration
 - `tox.ini` - tox environment definitions
 - `client/.eslintrc.js` - ESLint rules
-- `client/.prettierrc.yml` - Prettier settings
+- `client/prettier.config.js` - Prettier settings
 
 **Makefile targets:**
 ```bash
@@ -840,8 +889,9 @@ cat .github/workflows/lint.yaml
 - Prettier: https://prettier.io/docs/
 
 **Galaxy-specific patterns:**
-- Code style guide: `doc/source/dev/style_guide.md` (if exists)
-- Type hints guide: `doc/source/dev/type_hints.md` (if exists)
+- Config files are the authority: `pyproject.toml` (black, ruff), `.isort.cfg`, `mypy.ini`,
+  `.flake8`, `client/prettier.config.js`, `client/.eslintrc.js`
+- CI entry points: `tox.ini`, `.ci/flake8_wrapper.sh`, `.ci/flake8_wrapper_docstrings.sh`
 
 ---
 

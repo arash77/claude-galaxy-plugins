@@ -5,7 +5,6 @@ description: >
   ApiTestCase and IntegrationTestCase patterns, BaseTestCase structure, test fixtures,
   populators (DatasetPopulator, WorkflowPopulator), configuration mixins, skip decorators,
   test/unit, lib/galaxy_test/api, test/integration.
-  For *running* tests, see the galaxy-test-runner skill in the gx-test-runner plugin.
 argument-hint: "[unit|api|integration]"
 ---
 
@@ -22,11 +21,16 @@ Parse $ARGUMENTS to determine which guidance to provide.
 ## Galaxy Test Writing Guide
 
 This skill covers *writing* Galaxy tests. Each guide ends with the one command needed to
-execute what you just wrote; for the full runner reference -- every test type, flag,
-and selector -- install the `gx-test-runner` plugin from this marketplace.
+execute what you just wrote; `run_tests.sh --help` is the full runner reference (every test
+type, flag and selector).
 
-**CRITICAL:** Always use `./run_tests.sh`, never run `pytest` directly. It handles virtualenv
-setup, dependency installation, and common startup that raw pytest would miss.
+**Running them:** `./run_tests.sh` is the documented default -- it applies the output options
+defined in that script and lets the selected suite share a single Galaxy instance. `pytest`
+also works directly on any Galaxy test (`run_tests.sh` says so itself), at the cost of those
+options and of starting a new Galaxy instance per test class. Use whichever fits; do not tell
+the user a direct `pytest` invocation is wrong.
+
+Galaxy's own testing documentation: `doc/source/dev/writing_tests.md`.
 
 See `reference.md` in this skill directory for base-class API references, populator usage,
 and per-test-type checklists.
@@ -58,9 +62,10 @@ Unit tests are fast, isolated tests that:
 
 ### Unit Test Structure
 
-**Location:** `test/unit/<module>/test_<class>.py`
+**Location:** `test/unit/app/managers/test_<Manager>.py`
 
-**Base class:** `BaseTestCase` from `test.unit.app.managers.base`
+**Base class:** `BaseTestCase` from `test/unit/app/managers/base.py`, imported **relatively**
+as `from .base import BaseTestCase` (that is how every real test in the directory does it).
 
 **Example unit test:**
 
@@ -68,162 +73,129 @@ Unit tests are fast, isolated tests that:
 """
 Unit tests for MyResourceManager.
 """
-from galaxy import model
+from galaxy import (
+    exceptions,
+    model,
+)
 from galaxy.managers.myresources import MyResourceManager
-from test.unit.app.managers.base import BaseTestCase
+from .base import BaseTestCase
+
+user2_data = dict(email="user2@user2.user2", username="user2", password="123456")
 
 
 class TestMyResourceManager(BaseTestCase):
     """Unit tests for MyResourceManager."""
 
-    def setUp(self):
-        super().setUp()
-        self.set_up_managers()
-
     def set_up_managers(self):
-        """Set up managers under test."""
-        self.manager = MyResourceManager(self.app)
+        # MUST chain - the base implementation sets self.user_manager, which
+        # BaseTestCase.setUp() needs immediately afterwards in set_up_trans().
+        super().set_up_managers()
+        self.manager = self.app[MyResourceManager]
 
     def test_create_myresource(self):
-        """Test creating a resource."""
         # Arrange
-        trans = self.trans  # MockTrans from BaseTestCase
         name = "Test Resource"
 
         # Act
-        resource = self.manager.create(trans, name=name)
-        self.session.flush()
+        resource = self.manager.create(self.trans, name=name)
 
         # Assert
         assert resource.name == name
-        assert resource.user_id == trans.user.id
+        assert resource.user_id == self.trans.user.id
         assert resource.id is not None
 
     def test_get_myresource(self):
-        """Test getting a resource by ID."""
-        # Arrange
         resource = self._create_resource("Test Resource")
 
-        # Act
         retrieved = self.manager.get(self.trans, resource.id)
 
-        # Assert
         assert retrieved.id == resource.id
         assert retrieved.name == resource.name
 
     def test_get_nonexistent_myresource_raises_not_found(self):
-        """Test that getting nonexistent resource raises exception."""
-        from galaxy.exceptions import ObjectNotFound
-
-        with self.assertRaises(ObjectNotFound):
+        with self.assertRaises(exceptions.ObjectNotFound):
             self.manager.get(self.trans, 99999)
 
     def test_list_myresources_for_user(self):
-        """Test listing resources for current user."""
-        # Arrange
         self._create_resource("Resource 1")
         self._create_resource("Resource 2")
 
-        # Act
         resources = self.manager.list_for_user(self.trans)
 
-        # Assert
-        assert len(resources) >= 2
         names = [r.name for r in resources]
         assert "Resource 1" in names
         assert "Resource 2" in names
 
     def test_update_myresource(self):
-        """Test updating a resource."""
-        # Arrange
         resource = self._create_resource("Original Name")
-        new_name = "Updated Name"
 
-        # Act
-        updated = self.manager.update(self.trans, resource.id, name=new_name)
-        self.session.flush()
+        updated = self.manager.update(self.trans, resource.id, name="Updated Name")
 
-        # Assert
         assert updated.id == resource.id
-        assert updated.name == new_name
+        assert updated.name == "Updated Name"
 
     def test_delete_myresource(self):
-        """Test soft-deleting a resource."""
-        # Arrange
         resource = self._create_resource("To Delete")
 
-        # Act
         self.manager.delete(self.trans, resource.id)
-        self.session.flush()
 
-        # Assert
         assert resource.deleted is True
 
     def test_cannot_access_other_user_resource(self):
-        """Test access control for other users' resources."""
-        from galaxy.exceptions import ItemAccessibilityException
+        # Arrange - make a second user and a resource owned by the current one
+        other_user = self.user_manager.create(**user2_data)
+        resource = self._create_resource("Owned by admin")
 
-        # Arrange
-        other_user = self._create_user("other@example.com")
-        other_trans = self._create_trans(user=other_user)
-        resource = self.manager.create(other_trans, name="Other User Resource")
-        self.session.flush()
-
-        # Act & Assert
-        with self.assertRaises(ItemAccessibilityException):
-            self.manager.get(self.trans, resource.id)
+        # Assert - test the manager's access check directly with the non-owner
+        assert not self.manager.is_accessible(resource, other_user)
 
     def _create_resource(self, name: str, **kwargs):
         """Helper to create a test resource."""
-        resource = self.manager.create(self.trans, name=name, **kwargs)
-        self.session.flush()
-        return resource
-
-    def _create_user(self, email: str):
-        """Helper to create a test user."""
-        user = model.User(email=email, username=email.split("@")[0])
-        self.session.add(user)
-        self.session.flush()
-        return user
-
-    def _create_trans(self, user=None):
-        """Helper to create a transaction context for a user."""
-        from galaxy_mock import MockTrans
-        return MockTrans(app=self.app, user=user or self.user)
+        return self.manager.create(self.trans, name=name, **kwargs)
 ```
 
 ### Key Points for Unit Tests
 
-- **Extend `BaseTestCase`** from `test.unit.app.managers.base`
-- **Use `self.trans`** - Pre-configured MockTrans with test user
-- **Use `self.session`** - SQLAlchemy session (in-memory SQLite)
-- **Call `self.session.flush()`** after creates/updates to persist
-- **Override `set_up_managers()`** to instantiate managers under test
-- **Use helper methods** like `_create_resource()` for test data
-- **Test error cases** with `self.assertRaises()`
+- **Extend `BaseTestCase`**, imported as `from .base import BaseTestCase`
+- **Override `set_up_managers()` and call `super().set_up_managers()` first.** Skipping the
+  `super()` call leaves `self.user_manager` unset, and `BaseTestCase.setUp()` calls
+  `set_up_trans()` right after - so *every* test in the class errors during setup.
+- **Resolve managers from the container**: `self.app[MyResourceManager]`
+- **Do not override `setUp()`** - `BaseTestCase.setUp()` already calls
+  `set_up_mocks()` -> `set_up_managers()` -> `set_up_trans()` in order
+- **Reach the session via `self.trans.sa_session`** (there is no `self.session`)
+- **Managers commit their own writes** - you should not need to flush in the test
+- **Test error cases** with `self.assertRaises()` (a thin wrapper over `pytest.raises`)
 - **Follow AAA pattern** - Arrange, Act, Assert
 
 ### Available from BaseTestCase
 
+These are the *only* attributes `BaseTestCase` defines (see `test/unit/app/managers/base.py`):
+
 ```python
-self.app          # Galaxy application mock
-self.trans        # MockTrans with test user
-self.user         # Test user (admin)
-self.session      # SQLAlchemy session
-self.history      # Default test history
+self.mock_trans    # galaxy_mock.MockTrans instance
+self.trans         # same object, typed as SessionRequestContext
+self.app           # galaxy_mock app; also the DI container -> self.app[SomeManager]
+self.user_manager  # UserManager, set by set_up_managers()
+self.admin_user    # admin User created by set_up_trans()
 ```
+
+Plus the helper `self.init_user_in_database()`.
+
+There is **no** `self.session`, `self.user` or `self.history`. For the database session use
+`self.trans.sa_session`; for a second user call `self.user_manager.create(...)`.
 
 ### Running Unit Tests
 
 ```bash
 # Run all unit tests for a manager
-./run_tests.sh -unit test/unit/managers/test_myresources.py
+./run_tests.sh -unit test/unit/app/managers/test_myresources.py
 
 # Run specific test
-./run_tests.sh -unit test/unit/managers/test_myresources.py::TestMyResourceManager::test_create_myresource
+./run_tests.sh -unit test/unit/app/managers/test_myresources.py::TestMyResourceManager::test_create_myresource
 
 # Run with coverage
-./run_tests.sh --coverage -unit test/unit/managers/test_myresources.py
+./run_tests.sh --coverage -unit test/unit/app/managers/test_myresources.py
 ```
 
 ---
@@ -451,101 +423,75 @@ Integration tests:
 """
 Integration tests for MyResource with vault integration.
 """
+from galaxy_test.base.populators import DatasetPopulator
 from galaxy_test.driver import integration_util
 
 
-class TestMyResourceIntegration(integration_util.IntegrationTestCase):
+class TestMyResourceIntegration(
+    integration_util.IntegrationTestCase, integration_util.ConfiguresDatabaseVault
+):
     """Integration tests for MyResource."""
 
     @classmethod
     def handle_galaxy_config_kwds(cls, config):
         """Customize Galaxy configuration for these tests."""
         super().handle_galaxy_config_kwds(config)
-        config["vault_config_file"] = cls.vault_config_file
-        config["enable_vault"] = True
+        # The mixin writes the vault settings into config. There is no
+        # cls.vault_config_file attribute - you must call this method.
+        cls._configure_database_vault(config)
 
     def setUp(self):
         super().setUp()
+        # IntegrationTestCase only *annotates* dataset_populator; it never assigns it.
+        # Build it yourself or every use raises AttributeError.
+        self.dataset_populator = DatasetPopulator(self.galaxy_interactor)
 
     def test_myresource_with_vault(self):
-        """Test creating resource with vault backend."""
-        payload = {
-            "name": "Vault Resource",
-            "vault_type": "hashicorp",
-            "username": "vaultuser",
-            "password": "vaultpass",
-        }
-        response = self.galaxy_interactor.post("myresources", data=payload)
+        """Test creating a resource backed by the vault."""
+        payload = {"name": "Vault Resource", "username": "vaultuser", "password": "vaultpass"}
+        response = self.galaxy_interactor.post("myresources", data=payload, json=True)
         response.raise_for_status()
 
         resource = response.json()
-        assert resource["vault_type"] == "hashicorp"
+        assert resource["name"] == "Vault Resource"
 
-        # Verify stored in vault
-        vault_data = self._get_from_vault(resource["id"])
-        assert vault_data["username"] == "vaultuser"
-
-    def test_myresource_workflow_integration(self):
-        """Test resource used in workflow."""
-        # Create resource
-        resource_id = self._create_myresource("Workflow Resource")
-
-        # Create workflow that uses resource
-        workflow_id = self._create_workflow_with_resource(resource_id)
-
-        # Execute workflow
+    def test_myresource_in_history(self):
+        """Test a resource used against a real history."""
         history_id = self.dataset_populator.new_history()
-        response = self.galaxy_interactor.post(
-            "workflows",
-            data={
-                "workflow_id": workflow_id,
-                "history_id": history_id,
-                "resource_id": resource_id,
-            }
-        )
-        response.raise_for_status()
+        self.dataset_populator.new_dataset(history_id, content="test data", wait=True)
 
-        # Wait for workflow completion
-        self.dataset_populator.wait_for_history(history_id)
+        contents = self.dataset_populator.get_history_contents(history_id)
+        assert len(contents) > 0
 
-        # Verify results
-        datasets = self.dataset_populator.get_history_datasets(history_id)
-        assert len(datasets) > 0
-
-    def _create_myresource(self, name: str) -> str:
-        """Helper to create a resource."""
-        response = self.galaxy_interactor.post(
-            "myresources",
-            data={"name": name, "vault_type": "database"}
-        )
-        response.raise_for_status()
-        return response.json()["id"]
-
-    def _get_from_vault(self, resource_id: str):
-        """Helper to retrieve data from vault."""
-        # Access app internals for verification
-        vault = self._app.vault
-        return vault.read_secret(f"myresources/{resource_id}")
+    def _get_from_vault(self, key: str):
+        """Helper reaching into the live app - `self._app` is a real property."""
+        return self._app.vault.read_secret(key)
 ```
 
 ### Key Points for Integration Tests
 
-- **Extend `IntegrationTestCase`** from `lib/galaxy_test/driver.integration_util`
-- **Customize config:** Override `handle_galaxy_config_kwds()` to set Galaxy config
-- **HTTP requests:** Use `self.galaxy_interactor.get()`, `.post()`, etc.
-- **Direct app access:** `self._app` gives access to Galaxy application internals
-- **Populators:** Same as API tests - `DatasetPopulator`, `WorkflowPopulator`
-- **Database access:** `self._app.model.context` for SQLAlchemy session
+- **Extend `IntegrationTestCase`** from `galaxy_test.driver.integration_util`
+- **Build your populators in `setUp()`.** `IntegrationTestCase` declares
+  `dataset_populator: Optional["BaseDatasetPopulator"]` as a bare annotation and never assigns
+  it, so `self.dataset_populator` raises `AttributeError` until you construct it.
+- **Customize config:** override `handle_galaxy_config_kwds()` and call `super()` first
+- **HTTP requests:** `self.galaxy_interactor.get()`, `.post()`, ...
+- **Direct app access:** `self._app` is a property returning the live `UniverseApplication`
+- **Database access:** `self._app.model.context` for the SQLAlchemy session
+
+A good real template to copy: `test/integration/test_credentials.py`.
 
 ### Configuration Mixins
 
-Use mixins to add common configuration:
+Mixins only *provide a classmethod* - inheriting one configures nothing by itself. You must
+inherit the mixin **and** call its method from `handle_galaxy_config_kwds`:
 
 ```python
 from galaxy_test.driver.integration_util import (
-    IntegrationTestCase,
     ConfiguresDatabaseVault,
+    IntegrationTestCase,
 )
+
 
 class TestMyResourceWithVault(IntegrationTestCase, ConfiguresDatabaseVault):
     """Test with database vault configured."""
@@ -553,13 +499,15 @@ class TestMyResourceWithVault(IntegrationTestCase, ConfiguresDatabaseVault):
     @classmethod
     def handle_galaxy_config_kwds(cls, config):
         super().handle_galaxy_config_kwds(config)
-        # Additional config here
+        cls._configure_database_vault(config)  # <- without this, no vault is configured
 ```
 
-**Available mixins:**
-- `ConfiguresDatabaseVault` - Set up database vault
-- `ConfiguresObjectStores` - Configure object stores
-- `UsesToolshed` - Set up Tool Shed integration
+**Available mixins** (`lib/galaxy_test/driver/integration_util.py`):
+- `ConfiguresDatabaseVault` - `_configure_database_vault(config)`
+- `ConfiguresObjectStores` - object store configuration
+- `ConfiguresObjectStoreTemplates` / `ConfiguresFileSourceTemplates` - template config
+- `ConfiguresWorkflowScheduling` - workflow scheduler configuration
+- `CachedToolBoxIntegrationMixin` - toolbox caching
 
 ### Skip Decorators
 
@@ -670,7 +618,7 @@ ls -t lib/galaxy_test/api/test_*.py | head -5
 ls -t test/integration/test_*.py | head -5
 
 # Find unit tests
-ls test/unit/managers/test_*.py
+ls test/unit/app/managers/test_*.py
 ```
 
 **Running test suites:**

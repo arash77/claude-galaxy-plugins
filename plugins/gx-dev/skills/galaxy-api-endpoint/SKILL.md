@@ -39,15 +39,19 @@ ls -t lib/galaxy/webapps/galaxy/api/*.py | head -5
 ```
 
 Read one of these files to understand current patterns. Good examples:
-- `lib/galaxy/webapps/galaxy/api/job_files.py` - Simple CRUD operations
+- `lib/galaxy/webapps/galaxy/api/job_lock.py` - Smallest router (~24 lines): plain function routes
+- `lib/galaxy/webapps/galaxy/api/tags.py` - Smallest `@router.cbv` class-based view (~53 lines)
 - `lib/galaxy/webapps/galaxy/api/workflows.py` - Complex resource with many operations
 - `lib/galaxy/webapps/galaxy/api/histories.py` - RESTful resource with nested routes
 
+Note: `api/job_files.py` is a **legacy WSGI controller** (`BaseGalaxyAPIController`), not a
+FastAPI router. Do not use it as a template for new endpoints.
+
 **Key patterns to observe:**
-- Router setup: `router = APIRouter(tags=["resource_name"])`
-- Dependency injection: `DependsOnTrans`, custom dependency functions
+- Router setup: `router = Router(tags=["resource_name"])` - Galaxy's `Router`, never FastAPI's `APIRouter`
+- Dependency injection: `depends(SomeManager)` for managers, `DependsOnTrans` for request context
 - Request/response models: Pydantic schemas from `galaxy.schema`
-- Error handling: Raising appropriate HTTP exceptions
+- Error handling: Raising appropriate exceptions from `galaxy.exceptions`
 - Documentation: Docstrings and OpenAPI metadata
 
 ---
@@ -60,8 +64,11 @@ Create request/response models in `lib/galaxy/schema/` (or update existing schem
 
 **Common imports:**
 ```python
+from datetime import datetime
 from typing import Optional, List
+
 from pydantic import Field
+
 from galaxy.schema.fields import EncodedDatabaseIdField
 from galaxy.schema.schema import Model
 ```
@@ -114,32 +121,41 @@ Business logic belongs in manager classes in `lib/galaxy/managers/`.
 
 **Manager pattern structure:**
 ```python
-from typing import Optional
-from galaxy import model
+from typing import (
+    List,
+    Optional,
+)
+
+from sqlalchemy import select
+
+from galaxy import (
+    exceptions,
+    model,
+)
 from galaxy.managers.context import ProvidesUserContext
-from galaxy.model import Session
+from galaxy.model.scoped_session import galaxy_scoped_session
+
 
 class MyResourceManager:
     """Manager for MyResource operations."""
 
-    def __init__(self, app):
-        self.app = app
-        self.sa_session: Session = app.model.context
+    def __init__(self, sa_session: galaxy_scoped_session):
+        self.sa_session = sa_session
 
     def create(
         self,
         trans: ProvidesUserContext,
         name: str,
-        description: Optional[str] = None
+        description: Optional[str] = None,
     ) -> model.MyResource:
         """Create a new resource."""
         resource = model.MyResource(
             user=trans.user,
             name=name,
-            description=description
+            description=description,
         )
         self.sa_session.add(resource)
-        self.sa_session.flush()
+        self.sa_session.commit()
         return resource
 
     def get(self, trans: ProvidesUserContext, resource_id: int) -> model.MyResource:
@@ -159,16 +175,17 @@ class MyResourceManager:
 
     def list_for_user(self, trans: ProvidesUserContext) -> List[model.MyResource]:
         """List all resources for the current user."""
-        stmt = select(model.MyResource).where(
-            model.MyResource.user_id == trans.user.id
-        )
-        return self.sa_session.scalars(stmt).all()
+        stmt = select(model.MyResource).where(model.MyResource.user_id == trans.user.id)
+        return list(self.sa_session.scalars(stmt))
 ```
 
 **Manager best practices:**
-- Constructor takes `app` (the Galaxy application object)
-- Methods take `trans` (transaction/request context) as first parameter
+- Declare constructor dependencies with **type annotations** (`sa_session: galaxy_scoped_session`).
+  Galaxy's DI container resolves them by type, which is what makes `depends(MyResourceManager)` work
+  in the router. A constructor that takes an untyped `app` cannot be resolved this way.
+- Methods take `trans` (request context) as first parameter
 - Use `self.sa_session` for database operations
+- **Call `self.sa_session.commit()` after mutating** - see the session gotcha below
 - Raise appropriate exceptions from `galaxy.exceptions`
 - Implement access control checks in separate methods
 - Use SQLAlchemy 2.0 `select()` syntax for queries
@@ -187,40 +204,45 @@ Create or update the API router in `lib/galaxy/webapps/galaxy/api/`.
 API endpoints for MyResource operations.
 """
 import logging
-from typing import Optional
+from typing import (
+    Annotated,
+    Optional,
+)
 
 from fastapi import (
-    APIRouter,
-    Depends,
+    Body,
     Path,
-    Query,
     status,
 )
 
 from galaxy.managers.context import ProvidesUserContext
 from galaxy.managers.myresources import MyResourceManager
+from galaxy.schema.fields import DecodedDatabaseIdField
 from galaxy.schema.schema import (
     MyResourceCreateRequest,
-    MyResourceResponse,
     MyResourceListResponse,
+    MyResourceResponse,
 )
-from galaxy.webapps.galaxy.api import (
+from . import (
+    depends,
     DependsOnTrans,
     Router,
 )
-from galaxy.webapps.galaxy.api.depends import get_app
 
 log = logging.getLogger(__name__)
 
 router = Router(tags=["myresources"])
 
-# Dependency for manager
-def get_myresource_manager(app=Depends(get_app)) -> MyResourceManager:
-    return MyResourceManager(app)
+# Path param alias: DecodedDatabaseIdField decodes the client's encoded id for you.
+# Declare aliases like this next to the router, or reuse one from `api/common.py`.
+MyResourceIdPathParam = Annotated[
+    DecodedDatabaseIdField, Path(..., title="MyResource ID", description="The encoded database identifier.")
+]
+
 
 @router.cbv
 class FastAPIMyResources:
-    manager: MyResourceManager = Depends(get_myresource_manager)
+    manager: MyResourceManager = depends(MyResourceManager)
 
     @router.get(
         "/api/myresources",
@@ -234,7 +256,7 @@ class FastAPIMyResources:
         """List all resources owned by the current user."""
         items = self.manager.list_for_user(trans)
         return MyResourceListResponse(
-            items=[self._serialize(item) for item in items],
+            items=[self._serialize(trans, item) for item in items],
             total_count=len(items),
         )
 
@@ -246,16 +268,16 @@ class FastAPIMyResources:
     )
     def create(
         self,
+        payload: MyResourceCreateRequest = Body(...),
         trans: ProvidesUserContext = DependsOnTrans,
-        request: MyResourceCreateRequest = ...,
     ) -> MyResourceResponse:
         """Create a new resource."""
         resource = self.manager.create(
             trans,
-            name=request.name,
-            description=request.description,
+            name=payload.name,
+            description=payload.description,
         )
-        return self._serialize(resource)
+        return self._serialize(trans, resource)
 
     @router.get(
         "/api/myresources/{id}",
@@ -264,15 +286,15 @@ class FastAPIMyResources:
     )
     def show(
         self,
+        id: MyResourceIdPathParam,
         trans: ProvidesUserContext = DependsOnTrans,
-        id: EncodedDatabaseIdField = Path(..., description="Resource ID"),
     ) -> MyResourceResponse:
         """Get a specific resource by ID."""
-        decoded_id = trans.security.decode_id(id)
-        resource = self.manager.get(trans, decoded_id)
-        return self._serialize(resource)
+        # `id` already arrives decoded - do NOT call trans.security.decode_id() on it.
+        resource = self.manager.get(trans, id)
+        return self._serialize(trans, resource)
 
-    def _serialize(self, resource) -> MyResourceResponse:
+    def _serialize(self, trans: ProvidesUserContext, resource) -> MyResourceResponse:
         """Convert model object to response schema."""
         return MyResourceResponse(
             id=trans.security.encode_id(resource.id),
@@ -284,35 +306,43 @@ class FastAPIMyResources:
 ```
 
 **Router best practices:**
-- Use `Router` (capital R) from `galaxy.webapps.galaxy.api` (subclass of FastAPI's APIRouter)
+- Use `Router` (capital R) from `galaxy.webapps.galaxy.api`, **never** FastAPI's `APIRouter`.
+  `Router` subclasses `FrameworkRouter`, which is what provides `.cbv`, `require_admin=`, and
+  Galaxy's standard error responses. A bare `APIRouter` has no `.cbv` and fails at import time.
 - Use `@router.cbv` class-based views for grouping related endpoints
-- Use dependency injection for managers: `manager: Manager = Depends(get_manager)`
-- Use `DependsOnTrans` for transaction context
-- Path parameters use `Path(...)` with descriptions
+- Inject managers with Galaxy's container helper: `manager: Manager = depends(Manager)`.
+  **Never** `Depends(Manager)` - FastAPI would treat the manager's constructor arguments as
+  request parameters and the route would 422 on every call.
+- Use `DependsOnTrans` for request context; `require_admin=True` on the route decorator for admin-only
+- Path parameters: use an `Annotated[DecodedDatabaseIdField, Path(...)]` alias so the id is decoded
+  for you. `api/common.py` already defines many (`HistoryIDPathParam`, `UserIdPathParam`, ...)
 - Query parameters use `Query(...)` with defaults
 - Set appropriate HTTP status codes (`status_code=status.HTTP_201_CREATED` for creates)
 - Add `summary` to all endpoints for OpenAPI docs
-- Decode IDs in endpoint, not in manager (manager works with integer IDs)
+- The manager works with integer IDs; the `DecodedDatabaseIdField` alias performs the decode
 
 ---
 
-## Step 5: Register Router
+## Step 5: Router Registration - Nothing To Do
 
-The router must be registered in the main application builder.
+**Galaxy discovers routers automatically. Do not register anything.**
 
-**Location:** `lib/galaxy/webapps/galaxy/buildapp.py`
+`include_all_package_routers(app, "galaxy.webapps.galaxy.api")`
+(`lib/galaxy/webapps/galaxy/fast_app.py:232`) walks every module in the `api` package and
+includes any module-level attribute named `router`
+(`lib/galaxy/webapps/base/api.py:385-399`).
 
-**Add import:**
-```python
-from galaxy.webapps.galaxy.api import myresources
-```
+So the only requirements are:
+1. The file lives in `lib/galaxy/webapps/galaxy/api/`
+2. It defines a module-level `router = Router(...)`
 
-**Register router in `app_factory()`:**
-```python
-app.include_router(myresources.router)
-```
+There are **no** `app.include_router()` calls in `buildapp.py` - that file builds the legacy
+WSGI app. Adding one there will not register your route, and referencing the FastAPI `app`
+object from it raises `AttributeError` at startup.
 
-**Find the section:** Look for other `app.include_router()` calls and add yours in alphabetical order.
+> **Warning:** that same auto-discovery walk imports *every* module in the `api` package with no
+> `ImportError` guard. A bad import in your new router does not skip one route - **it stops
+> Galaxy from booting.** Verify your imports resolve before starting the server.
 
 ---
 
@@ -423,7 +453,16 @@ Run your new tests using the Galaxy test runner:
 ./run_tests.sh -api lib/galaxy_test/api/test_myresources.py --verbose_errors
 ```
 
-**IMPORTANT:** Always use `./run_tests.sh`, not `pytest` directly. The wrapper script sets up the correct environment.
+You can also run these with `pytest` directly:
+
+```bash
+pytest lib/galaxy_test/api/test_myresources.py
+```
+
+`run_tests.sh` is a documented convenience wrapper, not a requirement - it applies the output
+options defined in that script and lets the whole selected suite share one Galaxy instance.
+Invoking `pytest` directly skips those options and starts a **new Galaxy instance per test
+class**, which is fine (often faster) while iterating on a single test and slow for a full run.
 
 ---
 
@@ -451,8 +490,13 @@ Run your new tests using the Galaxy test runner:
    curl http://localhost:8080/api/myresources/{id}
    ```
 
-4. **Check auto-generated TypeScript types:**
-   The frontend types in `client/src/api/schema/schema.ts` will be auto-generated from your Pydantic schemas next time the schema is rebuilt.
+4. **Regenerate the TypeScript client types:**
+   Frontend types live in `client/packages/api-client/src/schema/schema.ts`. They are **not**
+   regenerated automatically - run the make target after changing any Pydantic schema:
+
+   ```bash
+   make update-client-api-schema
+   ```
 
 ---
 
@@ -483,13 +527,24 @@ ls lib/galaxy_test/api/test_*.py
 
 ## Common Gotchas
 
-1. **ID encoding:** Always encode IDs in API responses (`trans.security.encode_id()`) and decode in endpoints
+1. **ID encoding:** Responses carry encoded IDs (`EncodedDatabaseIdField` on the schema, or
+   `trans.security.encode_id()`). For *incoming* path/query params use a
+   `DecodedDatabaseIdField` alias, which decodes automatically.
+   **Never type an inbound param `EncodedDatabaseIdField`** - that annotation carries
+   `BeforeValidator(encode_id)`, an outbound `int -> str` encoder, so it would encode the
+   client's already-encoded id a second time and every valid ID would 404.
 2. **Transaction context:** Manager methods should take `trans` as first parameter
-3. **Database session:** Use `self.sa_session.flush()` after adding objects, not `commit()`
+3. **Database session:** Call `self.sa_session.commit()` after adding or mutating objects.
+   `flush()` alone writes nothing durable - the request-scoped session is discarded at request
+   teardown (`app.model.unset_request_id`), so the row silently disappears and a follow-up GET
+   404s. Galaxy's managers commit; see `doc/source/dev/database_session_management.md`.
 4. **Access control:** Always check if user can access resource before returning it
 5. **Error handling:** Raise exceptions from `galaxy.exceptions`, not generic ones
-6. **Router registration:** Don't forget to register your router in `buildapp.py`
-7. **Test runner:** Use `./run_tests.sh -api`, not plain `pytest`
+6. **Router registration:** Nothing to register - routers are auto-discovered (Step 5).
+   Do not touch `buildapp.py`.
+7. **Dependency injection:** `depends(Manager)`, not FastAPI's `Depends(Manager)`
+8. **Broken imports break the whole app:** the router auto-discovery walk has no `ImportError`
+   guard, so an unresolvable import in your module stops Galaxy from starting
 
 ---
 

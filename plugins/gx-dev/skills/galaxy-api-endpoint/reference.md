@@ -1,67 +1,129 @@
 # Galaxy API Endpoint Reference
 
-This file contains concrete examples and patterns from the Galaxy codebase for creating API endpoints.
+Patterns for creating Galaxy API endpoints.
 
-## Complete Example: Job Files API
+**Two kinds of code appear below.** Keep them straight:
 
-A real, simple example from `lib/galaxy/webapps/galaxy/api/job_files.py`:
+- **"Complete Example 1/2"** are *verbatim copies* of real files in the Galaxy tree
+  (`api/job_lock.py`, `api/tags.py`). Trust them, and re-read the originals if in doubt.
+- **Everything else** is an *illustrative* walkthrough of a hypothetical `credential` resource,
+  written to show the shape of each layer. The `model.Credential` table, `CredentialManager`
+  and the `Credential*` schemas in these snippets **do not exist** - you write them.
+
+> Galaxy *does* ship a real, unrelated credentials feature
+> (`api/credentials.py`, `managers/credentials.py` with `CredentialsManager`, `schema/credentials.py`).
+> It is a genuinely good, current example to read - but it is **not** the code below, and the
+> names differ. Do not import from it expecting these snippets' symbols.
+
+## Complete Example 1: Function-Based Routes
+
+The whole of `lib/galaxy/webapps/galaxy/api/job_lock.py` - Galaxy's smallest router, verbatim:
+
+```python
+from fastapi import Body
+
+from galaxy.managers.jobs import (
+    JobLock,
+    JobManager,
+)
+from . import (
+    depends,
+    Router,
+)
+
+router = Router(tags=["job_lock"])
+
+
+@router.get("/api/job_lock", require_admin=True)
+def job_lock_status(job_manager: JobManager = depends(JobManager)) -> JobLock:
+    """Get job lock status."""
+    return job_manager.job_lock()
+
+
+@router.put("/api/job_lock", require_admin=True)
+def update_job_lock(job_manager: JobManager = depends(JobManager), job_lock: JobLock = Body(...)) -> JobLock:
+    """Set job lock status."""
+    return job_manager.update_job_lock(job_lock)
+```
+
+**Key observations:**
+- `router = Router(...)` at module level - this attribute name is what makes Galaxy find the router
+- No registration step anywhere; nothing imports this module explicitly
+- Managers injected with `depends(JobManager)` - Galaxy's container helper, **not** `Depends(...)`
+- `require_admin=True` is a Galaxy `Router` extension, unavailable on a plain `APIRouter`
+- Return type annotation (`-> JobLock`) drives the OpenAPI response model
+- Routes carry the **full** path including the `/api` prefix
+
+---
+
+## Complete Example 2: Class-Based View
+
+The whole of `lib/galaxy/webapps/galaxy/api/tags.py` - the smallest `@router.cbv`, verbatim:
 
 ```python
 """
-API operations on Job files.
+API Controller providing Galaxy Tags
 """
+
 import logging
-from typing import Optional
 
 from fastapi import (
-    Depends,
-    Path,
+    Body,
+    Response,
+    status,
 )
 
 from galaxy.managers.context import ProvidesUserContext
-from galaxy.managers.jobs import (
-    JobManager,
-    summarize_job_files,
+from galaxy.managers.tags import (
+    ItemTagsPayload,
+    TagsManager,
 )
-from galaxy.schema.fields import DecodedDatabaseIdField
-from galaxy.schema.schema import JobFile
-from galaxy.webapps.galaxy.api import (
+from . import (
+    depends,
     DependsOnTrans,
     Router,
 )
 
 log = logging.getLogger(__name__)
 
-router = Router(tags=["jobs"])
+router = Router(tags=["tags"])
 
 
 @router.cbv
-class FastAPIJobFiles:
-    job_manager: JobManager = Depends(JobManager)
+class FastAPITags:
+    manager: TagsManager = depends(TagsManager)
 
-    @router.get(
-        "/api/jobs/{job_id}/files",
-        summary="Get a list of files associated with a job",
+    @router.put(
+        "/api/tags",
+        summary="Apply a new set of tags to an item.",
+        status_code=status.HTTP_204_NO_CONTENT,
     )
-    def index(
+    def update(
         self,
         trans: ProvidesUserContext = DependsOnTrans,
-        job_id: DecodedDatabaseIdField = Path(..., title="Job ID", description="The encoded ID of the job"),
-    ) -> list[JobFile]:
+        payload: ItemTagsPayload = Body(
+            ...,  # Required
+            title="Payload",
+            description="Request body containing the item and the tags to be assigned.",
+        ),
+    ):
+        """Replaces the tags associated with an item with the new ones specified in the payload.
+
+        - The previous tags will be __deleted__.
+        - If no tags are provided in the request body, the currently associated tags will also be __deleted__.
         """
-        Get a list of files associated with a job.
-        """
-        job = self.job_manager.get_accessible_job(trans, job_id)
-        return summarize_job_files(job)
+        self.manager.update(trans, payload)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 ```
 
 **Key observations:**
-- Simple router with one endpoint
-- Uses `@router.cbv` class-based view
-- Manager injected via `Depends()`
-- Transaction context via `DependsOnTrans`
-- Path parameter with `DecodedDatabaseIdField` type
-- Returns Pydantic model directly (`list[JobFile]`)
+- `@router.cbv` groups endpoints that share dependencies
+- The manager is a **class attribute**: `manager: TagsManager = depends(TagsManager)`
+- Request context via `trans: ProvidesUserContext = DependsOnTrans`
+- Helpers are imported from the package itself: `from . import depends, DependsOnTrans, Router`
+- `status_code=` on the decorator sets the documented success status
+
+---
 
 ---
 
@@ -70,7 +132,10 @@ class FastAPIJobFiles:
 ### Basic Response Model
 
 ```python
+from datetime import datetime
+
 from pydantic import Field
+
 from galaxy.schema.fields import EncodedDatabaseIdField
 from galaxy.schema.schema import Model
 
@@ -158,7 +223,7 @@ class CredentialManager:
             password=password,
         )
         self.sa_session.add(credential)
-        self.sa_session.flush()
+        self.sa_session.commit()
         return credential
 
     def get(self, trans: ProvidesUserContext, credential_id: int) -> model.Credential:
@@ -194,14 +259,14 @@ class CredentialManager:
             credential.username = username
         if password is not None:
             credential.password = password
-        self.sa_session.flush()
+        self.sa_session.commit()
         return credential
 
     def delete(self, trans: ProvidesUserContext, credential_id: int) -> None:
         """Soft-delete a credential."""
         credential = self.get(trans, credential_id)
         credential.deleted = True
-        self.sa_session.flush()
+        self.sa_session.commit()
 
     def is_accessible(self, credential: model.Credential, user: Optional[model.User]) -> bool:
         """Check if user can access this credential."""
@@ -217,35 +282,41 @@ class CredentialManager:
 ### Full CRUD Router
 
 ```python
+from typing import Annotated
+
 from fastapi import (
-    Depends,
+    Body,
     Path,
     Query,
     status,
 )
+
 from galaxy.managers.context import ProvidesUserContext
-from galaxy.managers.credentials import CredentialManager
-from galaxy.schema.fields import EncodedDatabaseIdField
-from galaxy.schema.schema import (
+from galaxy.schema.fields import DecodedDatabaseIdField
+# These four live in whichever module you create for this resource:
+from galaxy.managers.mycredentials import CredentialManager
+from galaxy.schema.mycredentials import (
     CreateCredentialRequest,
     UpdateCredentialRequest,
     CredentialResponse,
     CredentialListResponse,
 )
-from galaxy.webapps.galaxy.api import (
+from . import (
+    depends,
     DependsOnTrans,
     Router,
 )
-from galaxy.webapps.galaxy.api.depends import get_app
 
 router = Router(tags=["credentials"])
 
-def get_credential_manager(app=Depends(get_app)) -> CredentialManager:
-    return CredentialManager(app)
+CredentialIdPathParam = Annotated[
+    DecodedDatabaseIdField, Path(..., title="Credential ID", description="The encoded database identifier.")
+]
+
 
 @router.cbv
 class FastAPICredentials:
-    manager: CredentialManager = Depends(get_credential_manager)
+    manager: CredentialManager = depends(CredentialManager)
 
     @router.get(
         "/api/credentials",
@@ -291,12 +362,12 @@ class FastAPICredentials:
     )
     def show(
         self,
+        id: CredentialIdPathParam,
         trans: ProvidesUserContext = DependsOnTrans,
-        id: EncodedDatabaseIdField = Path(..., description="Credential ID"),
     ) -> CredentialResponse:
         """Get a specific credential by ID."""
-        decoded_id = trans.security.decode_id(id)
-        credential = self.manager.get(trans, decoded_id)
+        # `id` arrives already decoded - never call decode_id() on it again.
+        credential = self.manager.get(trans, id)
         return self._serialize(trans, credential)
 
     @router.put(
@@ -306,18 +377,17 @@ class FastAPICredentials:
     )
     def update(
         self,
+        id: CredentialIdPathParam,
+        payload: UpdateCredentialRequest = Body(...),
         trans: ProvidesUserContext = DependsOnTrans,
-        id: EncodedDatabaseIdField = Path(..., description="Credential ID"),
-        request: UpdateCredentialRequest = ...,
     ) -> CredentialResponse:
         """Update an existing credential."""
-        decoded_id = trans.security.decode_id(id)
         credential = self.manager.update(
             trans,
-            decoded_id,
-            name=request.name,
-            username=request.username,
-            password=request.password,
+            id,
+            name=payload.name,
+            username=payload.username,
+            password=payload.password,
         )
         return self._serialize(trans, credential)
 
@@ -328,12 +398,11 @@ class FastAPICredentials:
     )
     def delete(
         self,
+        id: CredentialIdPathParam,
         trans: ProvidesUserContext = DependsOnTrans,
-        id: EncodedDatabaseIdField = Path(..., description="Credential ID"),
     ) -> None:
         """Delete a credential."""
-        decoded_id = trans.security.decode_id(id)
-        self.manager.delete(trans, decoded_id)
+        self.manager.delete(trans, id)
 
     def _serialize(self, trans: ProvidesUserContext, credential) -> CredentialResponse:
         """Convert model to response schema."""
@@ -534,18 +603,23 @@ from fastapi import (
 
 from galaxy.managers.context import ProvidesUserContext
 from galaxy.managers.myresource import MyResourceManager
-from galaxy.schema.fields import EncodedDatabaseIdField, DecodedDatabaseIdField
+from galaxy.schema.fields import DecodedDatabaseIdField
 from galaxy.schema.schema import (
     MyResourceRequest,
     MyResourceResponse,
     MyResourceListResponse,
 )
-from galaxy.webapps.galaxy.api import (
+from . import (
+    depends,
     DependsOnTrans,
     Router,
 )
-from galaxy.webapps.galaxy.api.depends import get_app
 ```
+
+> `galaxy.webapps.galaxy.api.depends` **does not exist**. `depends`, `DependsOnTrans` and `Router`
+> all come from the `galaxy.webapps.galaxy.api` package itself - inside the package, import them
+> with `from . import ...`. Use `EncodedDatabaseIdField` only on **response** schemas, never on an
+> inbound path or query parameter.
 
 ### Manager File Imports
 
@@ -554,7 +628,7 @@ from typing import List, Optional
 from sqlalchemy import select, and_, or_
 from galaxy import model, exceptions
 from galaxy.managers.context import ProvidesUserContext
-from galaxy.model import Session
+from galaxy.model.scoped_session import galaxy_scoped_session
 ```
 
 ### Test File Imports
@@ -628,9 +702,11 @@ When creating a new API endpoint, ensure:
 - [ ] Pydantic schemas defined in `lib/galaxy/schema/`
 - [ ] Manager class created/updated in `lib/galaxy/managers/`
 - [ ] FastAPI router created in `lib/galaxy/webapps/galaxy/api/`
-- [ ] Router registered in `lib/galaxy/webapps/galaxy/buildapp.py`
+- [ ] Router exposed as a module-level `router = Router(...)` (auto-discovered; nothing to register)
+- [ ] Manager injected with `depends(Manager)`, not `Depends(...)`
+- [ ] Mutating manager methods call `sa_session.commit()`
 - [ ] Tests written in `lib/galaxy_test/api/`
-- [ ] All tests pass with `./run_tests.sh -api`
+- [ ] All tests pass with `./run_tests.sh -api` (or `pytest` directly)
 - [ ] OpenAPI docs show correctly at `/api/docs`
 - [ ] Manual testing completed
 - [ ] Error cases handled properly

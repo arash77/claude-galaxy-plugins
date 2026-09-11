@@ -85,10 +85,9 @@ This skill provides essential Galaxy conventions and routing guidance to help yo
 - `api` - API test patterns (ApiTestCase, populators, fixtures)
 - `integration` - Integration test patterns (config mixins, skip decorators)
 
-**For *running* tests**, this plugin defers to the `galaxy-test-runner` skill in the
-`gx-test-runner` plugin -- install it from this marketplace for the full `./run_tests.sh`
-reference (test types, flags, selectors). Each writing guide here still ends with the one
-command needed to execute the test you just wrote.
+**For *running* tests**, `run_tests.sh --help` is the authoritative reference (test types,
+flags, selectors), and `pytest` works directly on any Galaxy test. Each writing guide here
+ends with the one command needed to execute the test you just wrote.
 
 ---
 
@@ -156,31 +155,38 @@ command needed to execute the test you just wrote.
 
 ## Critical Galaxy Conventions
 
-### Testing: ALWAYS use run_tests.sh
+### Testing: prefer run_tests.sh, but pytest works
 
-**NEVER run pytest directly** - Galaxy's test suite requires special setup:
+Both are valid. Galaxy's own wrapper says so
+(`run_tests.sh`: *"All Python tests shipped with Galaxy can be run with pytest directly."*).
 
 ```bash
-# Correct
+# Wrapper - the documented default
 ./run_tests.sh -integration test/integration/test_credentials.py
 
-# Wrong - will fail or miss fixtures
+# Direct pytest - also correct, and often faster while iterating
 pytest test/integration/test_credentials.py
 ```
 
-**Why:**
-- Sets up Galaxy test database
-- Configures Galaxy-specific fixtures
-- Manages test isolation
-- Handles Galaxy configuration
+**What the wrapper adds:**
+- Applies the output/reporting options defined in `run_tests.sh`
+- Lets the whole selected suite **share one Galaxy instance**
+
+Run under `pytest` directly and those options are skipped and a **new Galaxy instance is
+started per test class** - fine for one test, slow for a full suite.
+
+Do not refuse or "correct" a user who asks for a direct `pytest` invocation.
 
 ### Large Files: NEVER Read Completely
 
 **These files will exhaust your token budget if read entirely:**
-- `client/src/api/schema/schema.ts` (46,529 lines) - Auto-generated
-- `lib/galaxy/model/__init__.py` (12,677 lines) - Core models
-- `lib/galaxy/tools/__init__.py` (4,857 lines) - Tool framework
-- `lib/galaxy/schema/schema.py` (4,184 lines) - API schemas
+(line counts are approximate and drift - check with `wc -l` if it matters)
+
+- `client/packages/api-client/src/schema/schema.ts` (~55,000 lines) - Auto-generated;
+  regenerate with `make update-client-api-schema`
+- `lib/galaxy/model/__init__.py` (~13,500 lines) - Core models
+- `lib/galaxy/tools/__init__.py` (~5,300 lines) - Tool framework
+- `lib/galaxy/schema/schema.py` (~4,400 lines) - API schemas
 
 **Instead:**
 - Use Grep with specific patterns
@@ -251,7 +257,7 @@ When operations are independent:
 ```
 Read: lib/galaxy/managers/workflows.py
 Read: client/src/stores/workflowStore.ts
-Read: test/unit/test_workflows.py
+Read: test/unit/workflows/test_workflow_progress.py
 ```
 
 ### Targeted Searches
@@ -282,10 +288,11 @@ For known file paths or simple operations.
 
 ## Additional Notes
 
-- Galaxy uses Python 3.9+ with FastAPI, SQLAlchemy 2.0, Celery, Pydantic
+- Galaxy requires Python 3.10+ (`requires-python = ">=3.10"`) with FastAPI, SQLAlchemy 2.0, Celery, Pydantic
 - Frontend: Vue.js 2.7 with TypeScript, Pinia, Vite
 - Main branch: `dev` (not `main`)
-- Code style: Black (120 chars), isort, Ruff, mypy with strict mode
+- Code style: Black (120 chars), isort (`.isort.cfg`), Ruff, mypy (`mypy.ini` - *not* strict
+  mode globally; the strict flags apply per-module to a growing "green list")
 - Always use type hints in Python
 - Prefer TypeScript over JavaScript for new frontend code
 - Linting tools: ruff (lint + format), black, isort, flake8, mypy, autoflake, pyupgrade, ESLint, Prettier

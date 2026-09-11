@@ -59,7 +59,7 @@ Follow this workflow:
 
 Ask the user if they have:
 1. Updated SQLAlchemy models in `lib/galaxy/model/__init__.py`
-2. Added tests to `test/unit/data/model/mapping/test_*model_mapping.py`
+2. Added/updated model tests - mapping coverage lives in `test/unit/data/test_galaxy_mapping.py`
 
 If not, remind them these are prerequisites before creating a migration.
 
@@ -99,7 +99,9 @@ from galaxy.model.migrations.util import (
 - `alter_column(table_name, column_name, **kw)` - Modify column
 - `create_index(index_name, table_name, columns, **kw)` - Create index
 - `drop_index(index_name, table_name)` - Drop index
-- `create_foreign_key(constraint_name, table_name, columns, referent_table, referent_columns)` - Create FK
+- `create_foreign_key(foreign_key_name, table_name, referent_table, local_cols, remote_cols)` - Create FK
+  Note the order: **referent table before the local columns.**
+  e.g. `create_foreign_key("fk_name", "tool_source", "dynamic_tool", ["dynamic_tool_id"], ["id"])`
 - `create_unique_constraint(constraint_name, table_name, columns)` - Create unique constraint
 - `drop_constraint(constraint_name, table_name)` - Drop constraint
 - `transaction()` - Context manager for transaction wrapping
@@ -132,7 +134,9 @@ Suggest reading the most recent migration for reference:
 ls -t lib/galaxy/model/migrations/alembic/versions_gxy/*.py | head -1
 ```
 
-Then read it to see current patterns (e.g., `04cda22c48a9_add_job_direct_credentials_table.py`).
+Read whichever file that command returns - it is by definition the current pattern.
+A short, representative one is `e96dd6fd5863_add_working_directory_column_to_job.py`
+(conditional `add_column` guarded by `column_exists`).
 
 ### Step 5: Run Migration
 
@@ -145,7 +149,11 @@ Then read it to see current patterns (e.g., `04cda22c48a9_add_job_direct_credent
 Check that:
 1. Migration runs without errors
 2. Database schema matches model
-3. Tests pass: `./run_tests.sh -unit test/unit/data/model/mapping/test_*model_mapping.py`
+3. Tests pass:
+   ```bash
+   ./run_tests.sh -unit test/unit/data/test_galaxy_mapping.py
+   ./run_tests.sh -unit test/unit/data/model/migrations/
+   ```
 
 ---
 
@@ -274,9 +282,10 @@ If `dbversion` shows different revision than `version`, database needs upgrade/d
 2. Run migration again
 3. Restart Galaxy after successful migration
 
-### Problem: migrations.IncorrectVersionError
+### Problem: `IncorrectSAMigrateVersionError`
 
 **Cause:** Database not at expected SQLAlchemy Migrate version before Alembic upgrade.
+Raised from `lib/galaxy/model/migrations/exceptions.py`.
 
 **Solution:**
 1. Backup database
@@ -313,7 +322,8 @@ If `dbversion` shows different revision than `version`, database needs upgrade/d
        if not table_exists("my_table", False):
            create_table("my_table", ...)
    ```
-3. Consider using `--repair` flag if implementing manual fixes
+3. Make the migration idempotent with the `*_exists` guards above rather than editing the
+   database by hand - Galaxy's migration tooling has no repair flag.
 
 ### Problem: Cannot find revision file
 
@@ -340,7 +350,9 @@ If `dbversion` shows different revision than `version`, database needs upgrade/d
 **Key files to reference:**
 - Models: `lib/galaxy/model/__init__.py`
 - Utilities: `lib/galaxy/model/migrations/util.py`
-- Tests: `test/unit/data/model/mapping/test_*model_mapping.py`
+- Model mapping tests: `test/unit/data/test_galaxy_mapping.py`
+- Migration machinery tests: `test/unit/data/model/migrations/`
+- Data-fix migration tests: `test/unit/data/model/migration_fixes/`
 - Recent examples: `lib/galaxy/model/migrations/alembic/versions_gxy/` (check latest files)
 
 **External documentation:**
