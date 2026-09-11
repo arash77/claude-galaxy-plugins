@@ -21,8 +21,9 @@ Parse $ARGUMENTS to determine which guidance to provide.
 ## Galaxy Test Writing Guide
 
 This skill covers *writing* Galaxy tests. Each guide ends with the one command needed to
-execute what you just wrote; `run_tests.sh --help` is the full runner reference (every test
-type, flag and selector).
+execute what you just wrote. For the full runner reference -- every test type, flag and
+selector -- use the `galaxy-test-runner` skill if the `gx-test-runner` plugin is installed
+alongside this one; otherwise `run_tests.sh --help` covers the same ground.
 
 **Running them:** `./run_tests.sh` is the documented default -- it applies the output options
 defined in that script and lets the selected suite share a single Galaxy instance. `pytest`

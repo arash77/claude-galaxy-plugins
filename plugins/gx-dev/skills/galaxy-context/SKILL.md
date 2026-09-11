@@ -85,9 +85,10 @@ This skill provides essential Galaxy conventions and routing guidance to help yo
 - `api` - API test patterns (ApiTestCase, populators, fixtures)
 - `integration` - Integration test patterns (config mixins, skip decorators)
 
-**For *running* tests**, `run_tests.sh --help` is the authoritative reference (test types,
-flags, selectors), and `pytest` works directly on any Galaxy test. Each writing guide here
-ends with the one command needed to execute the test you just wrote.
+**For *running* tests**, defer to the `galaxy-test-runner` skill when the `gx-test-runner`
+plugin is installed; otherwise `run_tests.sh --help` is the authoritative reference (test
+types, flags, selectors). Either way `pytest` works directly on any Galaxy test. Each
+writing guide here ends with the one command needed to execute the test you just wrote.
 
 ---
 

@@ -77,8 +77,10 @@ Covers *writing* tests: `BaseTestCase` structure for unit tests, `ApiTestCase` a
 `IntegrationTestCase` with configuration mixins and skip decorators for integration tests.
 `reference.md` carries base-class API references, common test patterns, and per-type checklists.
 
-For *running* tests, `run_tests.sh --help` is the authoritative reference, and `pytest` works
-directly on any Galaxy test. Each guide here ends with the command to execute what you wrote.
+For *running* tests this plugin defers to the `galaxy-test-runner` skill in the companion
+`gx-test-runner` plugin, which owns the `./run_tests.sh` reference; without it,
+`run_tests.sh --help` covers the same ground and `pytest` works directly on any Galaxy test.
+Each guide here ends with the command to execute what you wrote.
 
 ### galaxy-linting
 
@@ -117,7 +119,8 @@ claude-galaxy-plugins/
 - **`gx-arch-review`** — reviews changes after they are written. Complementary: several topics
   appear in both, from opposite directions (this plugin builds a migration, `gx-review-migration`
   checks one).
-  This marketplace currently ships `gx-dev` and `gx-arch-review`.
+- **`gx-test-runner`** - owns running tests. `gx-dev:galaxy-test-writing` deliberately does
+  not duplicate its `./run_tests.sh` reference, and degrades gracefully when it is absent.
 
 ## License
 
